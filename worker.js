@@ -331,3 +331,15 @@ export default {
     return Response.json({ success: true, message: 'API is running' }, { headers: cors });
   }
 };
+
+async function checkText(text, type) {
+  console.log('>>> checkText called:', text, type);
+  if (containsBadWordLocal(text)) {
+    console.log('>>> LOCAL FILTER BLOCKED:', text);
+    return { valid: false, reason: 'local' };
+  }
+  console.log('>>> Local filter passed, calling AI...');
+  const aiOK = await checkWithAI(text, type);
+  if (!aiOK) return { valid: false, reason: 'ai' };
+  return { valid: true };
+}
