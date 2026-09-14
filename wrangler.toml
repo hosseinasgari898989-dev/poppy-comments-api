@@ -1,0 +1,13 @@
+name = "poppy-comments-api"
+main = "worker.js"
+compatibility_date = "2024-01-01"
+
+# ============ اتصال به دیتابیس D1 ============
+[[d1_databases]]
+binding = "DB"
+database_name = "poppy-comments-db"
+database_id = "اینجا-آیدی-دیتابیس-رو-بذار"
+
+# ============ اتصال به Workers AI ============
+[ai]
+binding = "AI"
