@@ -1,7 +1,7 @@
 export default { 
   async fetch(request, env) {
     const url = new URL(request.url);
-    const cors = { 
+    const cors = {  
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS', 
       'Access-Control-Allow-Headers': 'Content-Type, X-Admin-Token'
