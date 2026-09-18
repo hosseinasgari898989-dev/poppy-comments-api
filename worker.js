@@ -177,7 +177,6 @@ export default {
     // BAN HELPER — با پشتیبانی از fingerprint
     // ============================================
     async function findActiveBan(env, userId, fingerprint, banContext) {
-      // banContext: 'comment' | 'report' | 'site' | null (any)
       let typeCondition;
       if (banContext === 'comment') {
         typeCondition = "(ban_type = 'all' OR ban_type = 'comment')";
@@ -312,14 +311,13 @@ export default {
             bannedUntil = d.toISOString().replace('T', ' ').slice(0, 19);
           }
 
-          // 🔍 fingerprint کاربر رو از کامنت‌هاش استخراج کن
           let userFingerprint = null;
           try {
             const fpRow = await env.DB.prepare(
               'SELECT fingerprint FROM comments WHERE user_id = ? AND fingerprint IS NOT NULL ORDER BY created_at DESC LIMIT 1'
             ).bind(userId).first();
             if (fpRow && fpRow.fingerprint) userFingerprint = fpRow.fingerprint;
-          } catch (e) { /* ستون ممکنه وجود نداشته باشه، نادیده بگیر */ }
+          } catch (e) { /* ستون ممکنه نباشه */ }
 
           await env.DB.prepare(`
             INSERT INTO bans (user_id, fingerprint, reason, banned_at, banned_until, is_permanent, ban_type)
@@ -380,7 +378,6 @@ export default {
           for (const userId of userIds) {
             if (!userId) continue;
 
-            // 🔍 fingerprint
             let userFingerprint = null;
             try {
               const fpRow = await env.DB.prepare(
@@ -766,8 +763,9 @@ export default {
         return Response.json({
           success: true,
           banned: !!ban,
+          ban_type: ban ? ban.ban_type : null,
           banInfo: ban
-            ? { until: ban.is_permanent ? 'همیشه' : toISO(ban.banned_until), reason: ban.reason }
+            ? { until: ban.is_permanent ? 'همیشه' : toISO(ban.banned_until), reason: ban.reason, ban_type: ban.ban_type }
             : null
         }, { headers: cors });
       } catch (e) {
@@ -918,7 +916,6 @@ export default {
           return Response.json({ success: false, error: '❌ پیام شما نباید دارای فحش یا توهین باشد.' }, { status: 400, headers: cors });
         }
 
-        // چک وجود کامنت قبلی — هم با userId هم fingerprint
         let existing = null;
         if (fingerprint) {
           existing = await env.DB.prepare(
@@ -932,14 +929,12 @@ export default {
           return Response.json({ success: false, error: 'شما قبلاً نظر ثبت کرده‌اید.' }, { status: 403, headers: cors });
         }
 
-        // ذخیره fingerprint اگه اومده باشه
         if (fingerprint) {
           try {
             await env.DB.prepare(
               'INSERT INTO comments (name, comment, user_id, fingerprint) VALUES (?, ?, ?, ?)'
             ).bind(name, comment, userId, fingerprint).run();
           } catch (e) {
-            // ستون fingerprint شاید نباشه
             await env.DB.prepare('INSERT INTO comments (name, comment, user_id) VALUES (?, ?, ?)').bind(name, comment, userId).run();
           }
         } else {
@@ -1004,7 +999,6 @@ export default {
           'SELECT id, comment, name, admin_reply, admin_reply_at FROM comments WHERE user_id = ?'
         ).bind(userId).first();
 
-        // چک بن — چه با userId چه با fingerprint
         const ban = await findActiveBan(env, userId, fingerprint, null);
 
         return Response.json({
@@ -1012,6 +1006,7 @@ export default {
           hasComment: !!ex,
           comment: ex || null,
           banned: !!ban,
+          ban_type: ban ? ban.ban_type : null,
           banInfo: ban
             ? {
                 until: ban.is_permanent ? 'همیشه' : toISO(ban.banned_until),
