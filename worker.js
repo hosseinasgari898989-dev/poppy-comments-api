@@ -10,7 +10,7 @@ export default {
     if (request.method === 'OPTIONS') return new Response(null, { headers: cors });
 
     // ============================================
-    // STRONG WORDS — substring match (کلمات بلند و بی‌ابهام)
+    // STRONG WORDS
     // ============================================
     const STRONG_FA = [
       'کیر','کیرم','کیرت','کیرتو','کیرده','کیرخور','کیرخوار','کیرکلفت','کیرکش','کیرکشی',
@@ -42,9 +42,6 @@ export default {
       'kirkoloft','bisharaf','jende','kirr','kirim','kirto'
     ];
 
-    // ============================================
-    // WEAK WORDS — exact word match
-    // ============================================
     const WEAK_FA = [
       'کس','گه','خر','سگ','گاو','خوک','الاغ','میمون',
       'کون','کونی','زنا','زنازاده','زناکار',
@@ -74,9 +71,6 @@ export default {
       'jnd','jnde','gnde'
     ];
 
-    // ============================================
-    // نرمال‌سازی متن
-    // ============================================
     function normalizeText(t) {
       let s = t.toString().toLowerCase();
       s = s.replace(/[^\w\s\u0600-\u06FF]/g, ' ');
@@ -91,9 +85,6 @@ export default {
       return s;
     }
 
-    // ============================================
-    // فیلتر محلی
-    // ============================================
     function containsBadWordLocal(text) {
       if (!text) return false;
       const original = text.toString().toLowerCase();
@@ -133,9 +124,6 @@ export default {
       return false;
     }
 
-    // ============================================
-    // AI — چک فحش
-    // ============================================
     async function checkWithAI(text) {
       try {
         const r = await env.AI.run('@cf/meta/llama-3.3-70b-instruct-fp8-fast', {
@@ -171,9 +159,6 @@ export default {
       return { valid: true };
     }
 
-    // ============================================
-    // ADMIN helper
-    // ============================================
     function isAdmin(request) {
       const token = request.headers.get('X-Admin-Token');
       return !!(token && env.ADMIN_TOKEN && token === env.ADMIN_TOKEN);
@@ -183,19 +168,44 @@ export default {
       return Response.json({ success: false, error: 'دسترسی ندارید' }, { status: 401, headers: cors });
     }
 
-    // ============================================
-    // تبدیل تاریخ SQLite به ISO 8601
-    // ============================================
     function toISO(sqliteDate) {
       if (!sqliteDate) return null;
       return String(sqliteDate).replace(' ', 'T') + 'Z';
     }
 
     // ============================================
+    // BAN HELPER — با پشتیبانی از fingerprint
+    // ============================================
+    async function findActiveBan(env, userId, fingerprint, banContext) {
+      // banContext: 'comment' | 'report' | 'site' | null (any)
+      let typeCondition;
+      if (banContext === 'comment') {
+        typeCondition = "(ban_type = 'all' OR ban_type = 'comment')";
+      } else if (banContext === 'report') {
+        typeCondition = "(ban_type = 'all' OR ban_type = 'report')";
+      } else if (banContext === 'site') {
+        typeCondition = "(ban_type = 'all' OR ban_type = 'site')";
+      } else {
+        typeCondition = "1=1";
+      }
+
+      if (fingerprint && userId) {
+        const sql = `SELECT * FROM bans WHERE (user_id = ? OR (fingerprint IS NOT NULL AND fingerprint = ?)) AND (is_permanent = 1 OR banned_until > datetime('now')) AND ${typeCondition} ORDER BY banned_at DESC LIMIT 1`;
+        return await env.DB.prepare(sql).bind(userId, fingerprint).first();
+      } else if (userId) {
+        const sql = `SELECT * FROM bans WHERE user_id = ? AND (is_permanent = 1 OR banned_until > datetime('now')) AND ${typeCondition} ORDER BY banned_at DESC LIMIT 1`;
+        return await env.DB.prepare(sql).bind(userId).first();
+      } else if (fingerprint) {
+        const sql = `SELECT * FROM bans WHERE fingerprint IS NOT NULL AND fingerprint = ? AND (is_permanent = 1 OR banned_until > datetime('now')) AND ${typeCondition} ORDER BY banned_at DESC LIMIT 1`;
+        return await env.DB.prepare(sql).bind(fingerprint).first();
+      }
+      return null;
+    }
+
+    // ============================================
     // ADMIN ROUTES
     // ============================================
 
-    // ---- POST /api/admin/login ----
     if (url.pathname === '/api/admin/login' && request.method === 'POST') {
       try {
         const { token } = await request.json();
@@ -208,7 +218,6 @@ export default {
       }
     }
 
-    // ---- همه‌ی /api/admin/* نیاز به توکن ----
     if (url.pathname.startsWith('/api/admin/')) {
       if (!isAdmin(request)) return adminUnauthorized();
 
@@ -219,11 +228,13 @@ export default {
           const limit = Math.min(Math.max(1, limitParam), 500);
 
           const { results } = await env.DB.prepare(`
-            SELECT c.id, c.name, c.comment, c.user_id, c.created_at, c.updated_at,
+            SELECT c.id, c.name, c.comment, c.user_id, c.fingerprint, c.created_at, c.updated_at,
                    c.admin_reply, c.admin_reply_at,
-                   CASE WHEN b.id IS NOT NULL THEN 1 ELSE 0 END AS is_banned
+                   CASE WHEN b.id IS NOT NULL THEN 1 ELSE 0 END AS is_banned,
+                   b.ban_type AS ban_type
             FROM comments c
-            LEFT JOIN bans b ON b.user_id = c.user_id
+            LEFT JOIN bans b ON (b.user_id = c.user_id
+              OR (b.fingerprint IS NOT NULL AND c.fingerprint IS NOT NULL AND b.fingerprint = c.fingerprint))
               AND (b.is_permanent = 1 OR b.banned_until > datetime('now'))
             ORDER BY c.created_at DESC
             LIMIT ?
@@ -234,11 +245,13 @@ export default {
             name: r.name,
             comment: r.comment,
             user_id: r.user_id,
+            fingerprint: r.fingerprint,
             created_at: toISO(r.created_at),
             updated_at: toISO(r.updated_at),
             admin_reply: r.admin_reply,
             admin_reply_at: toISO(r.admin_reply_at),
-            is_banned: r.is_banned === 1
+            is_banned: r.is_banned === 1,
+            ban_type: r.ban_type || null
           }));
 
           const totalRow = await env.DB.prepare('SELECT COUNT(*) AS cnt FROM comments').first();
@@ -299,16 +312,26 @@ export default {
             bannedUntil = d.toISOString().replace('T', ' ').slice(0, 19);
           }
 
+          // 🔍 fingerprint کاربر رو از کامنت‌هاش استخراج کن
+          let userFingerprint = null;
+          try {
+            const fpRow = await env.DB.prepare(
+              'SELECT fingerprint FROM comments WHERE user_id = ? AND fingerprint IS NOT NULL ORDER BY created_at DESC LIMIT 1'
+            ).bind(userId).first();
+            if (fpRow && fpRow.fingerprint) userFingerprint = fpRow.fingerprint;
+          } catch (e) { /* ستون ممکنه وجود نداشته باشه، نادیده بگیر */ }
+
           await env.DB.prepare(`
-            INSERT INTO bans (user_id, reason, banned_at, banned_until, is_permanent, ban_type)
-            VALUES (?, ?, datetime('now'), ?, ?, ?)
+            INSERT INTO bans (user_id, fingerprint, reason, banned_at, banned_until, is_permanent, ban_type)
+            VALUES (?, ?, ?, datetime('now'), ?, ?, ?)
             ON CONFLICT(user_id) DO UPDATE SET
+              fingerprint = COALESCE(excluded.fingerprint, bans.fingerprint),
               reason = excluded.reason,
               banned_at = datetime('now'),
               banned_until = excluded.banned_until,
               is_permanent = excluded.is_permanent,
               ban_type = excluded.ban_type
-          `).bind(userId, reason || '', bannedUntil, isPermanent, type).run();
+          `).bind(userId, userFingerprint, reason || '', bannedUntil, isPermanent, type).run();
 
           if (alsoDeleteComment === true && (type === 'comment' || type === 'all')) {
             await env.DB.prepare('DELETE FROM comments WHERE user_id = ?').bind(userId).run();
@@ -356,16 +379,27 @@ export default {
           let count = 0;
           for (const userId of userIds) {
             if (!userId) continue;
+
+            // 🔍 fingerprint
+            let userFingerprint = null;
+            try {
+              const fpRow = await env.DB.prepare(
+                'SELECT fingerprint FROM comments WHERE user_id = ? AND fingerprint IS NOT NULL ORDER BY created_at DESC LIMIT 1'
+              ).bind(userId).first();
+              if (fpRow && fpRow.fingerprint) userFingerprint = fpRow.fingerprint;
+            } catch (e) { /* نادیده */ }
+
             await env.DB.prepare(`
-              INSERT INTO bans (user_id, reason, banned_at, banned_until, is_permanent, ban_type)
-              VALUES (?, ?, datetime('now'), ?, ?, ?)
+              INSERT INTO bans (user_id, fingerprint, reason, banned_at, banned_until, is_permanent, ban_type)
+              VALUES (?, ?, ?, datetime('now'), ?, ?, ?)
               ON CONFLICT(user_id) DO UPDATE SET
+                fingerprint = COALESCE(excluded.fingerprint, bans.fingerprint),
                 reason = excluded.reason,
                 banned_at = datetime('now'),
                 banned_until = excluded.banned_until,
                 is_permanent = excluded.is_permanent,
                 ban_type = excluded.ban_type
-            `).bind(userId, reason || '', bannedUntil, isPermanent, type).run();
+            `).bind(userId, userFingerprint, reason || '', bannedUntil, isPermanent, type).run();
             count++;
           }
 
@@ -584,7 +618,7 @@ export default {
           const limitParam = parseInt(url.searchParams.get('limit') || '200', 10);
           const limit = Math.min(Math.max(1, limitParam), 500);
 
-          let query, results;
+          let results;
           if (status === 'all' || !status) {
             ({ results } = await env.DB.prepare(
               'SELECT * FROM reports ORDER BY created_at DESC LIMIT ?'
@@ -721,14 +755,13 @@ export default {
     // REPORTS ROUTES (PUBLIC)
     // ============================================
 
-    // ---- GET /api/reports/check/:userId ----
+    // ---- GET /api/reports/check/:userId?fp=xxx ----
     if (url.pathname.startsWith('/api/reports/check/') && request.method === 'GET') {
       try {
         const userId = decodeURIComponent(url.pathname.split('/').pop());
+        const fingerprint = url.searchParams.get('fp') || null;
 
-        const ban = await env.DB.prepare(
-          "SELECT * FROM bans WHERE user_id = ? AND (is_permanent = 1 OR banned_until > datetime('now')) AND (ban_type = 'all' OR ban_type = 'report')"
-        ).bind(userId).first();
+        const ban = await findActiveBan(env, userId, fingerprint, 'report');
 
         return Response.json({
           success: true,
@@ -746,7 +779,7 @@ export default {
     // ---- POST /api/reports ----
     if (url.pathname === '/api/reports' && request.method === 'POST') {
       try {
-        let { userId, userName, type, subject, message } = await request.json();
+        let { userId, userName, type, subject, message, fingerprint } = await request.json();
 
         if (!userId || !subject || !message) {
           return Response.json({ success: false, error: 'فیلدها الزامی است' }, { status: 400, headers: cors });
@@ -763,7 +796,6 @@ export default {
           return Response.json({ success: false, error: 'متن پیام طولانی است' }, { status: 400, headers: cors });
         }
 
-        // چک وضعیت سایت (آفلاین / حالت به‌روزرسانی)
         const siteSettingsResult = await env.DB.prepare('SELECT key, value FROM site_settings').all();
         const settingsMap = {};
         for (const r of siteSettingsResult.results) settingsMap[r.key] = r.value;
@@ -775,10 +807,7 @@ export default {
           return Response.json({ success: false, error: 'update_mode', message: settingsMap.update_message || '' }, { status: 503, headers: cors });
         }
 
-        // چک بن کاربر (ban_type = 'all' یا 'report')
-        const ban = await env.DB.prepare(
-          "SELECT * FROM bans WHERE user_id = ? AND (is_permanent = 1 OR banned_until > datetime('now')) AND (ban_type = 'all' OR ban_type = 'report')"
-        ).bind(userId).first();
+        const ban = await findActiveBan(env, userId, fingerprint, 'report');
 
         if (ban) {
           const until = ban.is_permanent ? 'همیشه' : ban.banned_until;
@@ -849,7 +878,7 @@ export default {
     // ---- POST /api/comments ----
     if (url.pathname === '/api/comments' && request.method === 'POST') {
       try {
-        const { name, comment, userId } = await request.json();
+        const { name, comment, userId, fingerprint } = await request.json();
         if (!name || !comment || !userId) {
           return Response.json({ success: false, error: 'فیلدها الزامی است' }, { status: 400, headers: cors });
         }
@@ -857,7 +886,6 @@ export default {
           return Response.json({ success: false, error: 'طول متن زیاد است' }, { status: 400, headers: cors });
         }
 
-        // چک وضعیت سایت (آفلاین / حالت به‌روزرسانی)
         const siteSettingsResult = await env.DB.prepare('SELECT key, value FROM site_settings').all();
         const settingsMap = {};
         for (const r of siteSettingsResult.results) settingsMap[r.key] = r.value;
@@ -869,10 +897,7 @@ export default {
           return Response.json({ success: false, error: 'update_mode', message: settingsMap.update_message || '' }, { status: 503, headers: cors });
         }
 
-        // چک بن کاربر (ban_type = 'all' یا 'comment')
-        const ban = await env.DB.prepare(
-          "SELECT * FROM bans WHERE user_id = ? AND (is_permanent = 1 OR banned_until > datetime('now')) AND (ban_type = 'all' OR ban_type = 'comment')"
-        ).bind(userId).first();
+        const ban = await findActiveBan(env, userId, fingerprint, 'comment');
 
         if (ban) {
           const until = ban.is_permanent ? 'همیشه' : ban.banned_until;
@@ -893,12 +918,34 @@ export default {
           return Response.json({ success: false, error: '❌ پیام شما نباید دارای فحش یا توهین باشد.' }, { status: 400, headers: cors });
         }
 
-        const existing = await env.DB.prepare('SELECT id FROM comments WHERE user_id = ?').bind(userId).first();
+        // چک وجود کامنت قبلی — هم با userId هم fingerprint
+        let existing = null;
+        if (fingerprint) {
+          existing = await env.DB.prepare(
+            'SELECT id FROM comments WHERE user_id = ? OR (fingerprint IS NOT NULL AND fingerprint = ?) LIMIT 1'
+          ).bind(userId, fingerprint).first();
+        } else {
+          existing = await env.DB.prepare('SELECT id FROM comments WHERE user_id = ?').bind(userId).first();
+        }
+
         if (existing) {
           return Response.json({ success: false, error: 'شما قبلاً نظر ثبت کرده‌اید.' }, { status: 403, headers: cors });
         }
 
-        await env.DB.prepare('INSERT INTO comments (name, comment, user_id) VALUES (?, ?, ?)').bind(name, comment, userId).run();
+        // ذخیره fingerprint اگه اومده باشه
+        if (fingerprint) {
+          try {
+            await env.DB.prepare(
+              'INSERT INTO comments (name, comment, user_id, fingerprint) VALUES (?, ?, ?, ?)'
+            ).bind(name, comment, userId, fingerprint).run();
+          } catch (e) {
+            // ستون fingerprint شاید نباشه
+            await env.DB.prepare('INSERT INTO comments (name, comment, user_id) VALUES (?, ?, ?)').bind(name, comment, userId).run();
+          }
+        } else {
+          await env.DB.prepare('INSERT INTO comments (name, comment, user_id) VALUES (?, ?, ?)').bind(name, comment, userId).run();
+        }
+
         return Response.json({ success: true, message: 'ثبت شد' }, { status: 201, headers: cors });
       } catch (e) {
         return Response.json({ success: false, error: 'خطا در ثبت' }, { status: 500, headers: cors });
@@ -909,7 +956,7 @@ export default {
     if (url.pathname.startsWith('/api/comments/') && request.method === 'PUT') {
       try {
         const id = url.pathname.split('/').pop();
-        const { comment, userId } = await request.json();
+        const { comment, userId, fingerprint } = await request.json();
         if (!comment || !userId) {
           return Response.json({ success: false, error: 'فیلدها الزامی' }, { status: 400, headers: cors });
         }
@@ -947,18 +994,18 @@ export default {
       }
     }
 
-    // ---- GET /api/comments/check/:userId ----
+    // ---- GET /api/comments/check/:userId?fp=xxx ----
     if (url.pathname.startsWith('/api/comments/check/') && request.method === 'GET') {
       try {
         const userId = url.pathname.split('/').pop();
+        const fingerprint = url.searchParams.get('fp') || null;
 
         const ex = await env.DB.prepare(
           'SELECT id, comment, name, admin_reply, admin_reply_at FROM comments WHERE user_id = ?'
         ).bind(userId).first();
 
-        const ban = await env.DB.prepare(
-          "SELECT * FROM bans WHERE user_id = ? AND (is_permanent = 1 OR banned_until > datetime('now')) AND (ban_type = 'all' OR ban_type = 'comment')"
-        ).bind(userId).first();
+        // چک بن — چه با userId چه با fingerprint
+        const ban = await findActiveBan(env, userId, fingerprint, null);
 
         return Response.json({
           success: true,
@@ -966,7 +1013,11 @@ export default {
           comment: ex || null,
           banned: !!ban,
           banInfo: ban
-            ? { until: ban.is_permanent ? 'همیشه' : toISO(ban.banned_until), reason: ban.reason }
+            ? {
+                until: ban.is_permanent ? 'همیشه' : toISO(ban.banned_until),
+                reason: ban.reason,
+                ban_type: ban.ban_type
+              }
             : null
         }, { headers: cors });
       } catch (e) {
