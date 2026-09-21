@@ -220,7 +220,7 @@ export default {
 
     function isAdmin(request) {
       const token = request.headers.get('X-Admin-Token');
-      return !!(token && env.ADMIN_TOKEN && token === env.ADMIN_TOKEN);
+      return !!(token && env.AUTH_ADMIN_TOKEN && token === env.AUTH_ADMIN_TOKEN);
     }
 
     function adminUnauthorized() {
@@ -267,7 +267,7 @@ export default {
     if (url.pathname === '/api/admin/login' && request.method === 'POST') {
       try {
         const { token } = await request.json();
-        if (!token || !env.ADMIN_TOKEN || token !== env.ADMIN_TOKEN) {
+        if (!token || !env.AUTH_ADMIN_TOKEN || token !== env.AUTH_ADMIN_TOKEN) {
           return Response.json({ success: false, error: 'توکن نامعتبر' }, { status: 401, headers: cors });
         }
         return Response.json({ success: true }, { headers: cors });
