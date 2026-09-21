@@ -56,7 +56,20 @@ export default {
       return user || null;
     }
 
-    async function takeRateLimit(key, limit, windowMs) {
+    const MAX_COMMENT_EDITS = 3;
+
+async function ensureCommentEditTable(env) {
+  await env.DB.prepare(`
+    CREATE TABLE IF NOT EXISTS comment_edit_counts (
+      comment_id INTEGER PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      edit_count INTEGER NOT NULL DEFAULT 0 CHECK (edit_count BETWEEN 0 AND 3),
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `).run();
+}
+
+async function takeRateLimit(key, limit, windowMs) {
       await env.DB.prepare(
         `CREATE TABLE IF NOT EXISTS abuse_rate_limits (
           key TEXT PRIMARY KEY,
@@ -1045,6 +1058,15 @@ export default {
           return Response.json({ success: false, error: 'شما قبلاً نظر ثبت کرده‌اید.' }, { status: 403, headers: cors });
         }
 
+        try {
+          await ensureCommentEditTable(env);
+          await env.DB.prepare(
+            'INSERT OR IGNORE INTO comment_edit_counts (comment_id, user_id, edit_count) VALUES (?, ?, 0)'
+          ).bind(insert.meta.last_row_id, userId).run();
+        } catch (e) {
+          console.error('comment edit counter init failed:', e.message);
+        }
+
         return Response.json({ success: true, message: 'ثبت شد' }, { status: 201, headers: cors });
       } catch (e) {
         console.error('comments POST error:', e.message);
@@ -1065,9 +1087,24 @@ export default {
         }
 
         const id = url.pathname.split('/').pop();
-        const { comment } = await request.json();
+        const body = await request.json().catch(() => ({}));
+        const comment = typeof body.comment === 'string' ? body.comment.trim() : '';
+
         if (!comment) {
           return Response.json({ success: false, error: 'فیلدها الزامی' }, { status: 400, headers: cors });
+        }
+        if (comment.length > 500) {
+          return Response.json({ success: false, error: 'طول متن زیاد است' }, { status: 400, headers: cors });
+        }
+
+        await ensureCommentEditTable(env);
+
+        const existing = await env.DB.prepare(
+          'SELECT id FROM comments WHERE id = ? AND user_id = ? LIMIT 1'
+        ).bind(id, String(user.id)).first();
+
+        if (!existing) {
+          return Response.json({ success: false, error: 'دسترسی ندارید' }, { status: 403, headers: cors });
         }
 
         const check = await checkComment(comment);
@@ -1078,16 +1115,54 @@ export default {
           return Response.json({ success: false, error: '❌ پیام شما نباید دارای فحش یا توهین باشد.' }, { status: 400, headers: cors });
         }
 
-        const result = await env.DB.prepare(
-          "UPDATE comments SET comment = ?, updated_at = datetime('now') WHERE id = ? AND user_id = ?"
-        ).bind(comment, id, String(user.id)).run();
+        const results = await env.DB.batch([
+          env.DB.prepare(
+            'INSERT OR IGNORE INTO comment_edit_counts (comment_id, user_id, edit_count) VALUES (?, ?, 0)'
+          ).bind(id, String(user.id)),
+          env.DB.prepare(
+            `UPDATE comments
+             SET comment = ?, updated_at = datetime('now')
+             WHERE id = ? AND user_id = ?
+               AND EXISTS (
+                 SELECT 1 FROM comment_edit_counts
+                 WHERE comment_id = ? AND user_id = ? AND edit_count < ?
+               )`
+          ).bind(comment, id, String(user.id), id, String(user.id), MAX_COMMENT_EDITS),
+          env.DB.prepare(
+            `UPDATE comment_edit_counts
+             SET edit_count = edit_count + 1, updated_at = CURRENT_TIMESTAMP
+             WHERE comment_id = ? AND user_id = ? AND edit_count < ?`
+          ).bind(id, String(user.id), MAX_COMMENT_EDITS)
+        ]);
 
-        if (!result.meta || Number(result.meta.changes || 0) !== 1) {
-          return Response.json({ success: false, error: 'دسترسی ندارید' }, { status: 403, headers: cors });
+        const commentChanged = Number(results?.[1]?.meta?.changes || 0) === 1;
+        const counterChanged = Number(results?.[2]?.meta?.changes || 0) === 1;
+
+        if (!commentChanged || !counterChanged) {
+          return Response.json({
+            success: false,
+            error: 'edit_limit_reached',
+            message: 'به حداکثر ۳ بار ویرایش این نظر رسیده‌اید.',
+            editCount: MAX_COMMENT_EDITS,
+            remainingEdits: 0,
+            maxEdits: MAX_COMMENT_EDITS
+          }, { status: 429, headers: cors });
         }
 
-        return Response.json({ success: true }, { headers: cors });
+        const row = await env.DB.prepare(
+          'SELECT edit_count FROM comment_edit_counts WHERE comment_id = ? AND user_id = ?'
+        ).bind(id, String(user.id)).first();
+
+        const editCount = Math.min(MAX_COMMENT_EDITS, Math.max(0, Number(row?.edit_count || 0)));
+
+        return Response.json({
+          success: true,
+          editCount,
+          remainingEdits: Math.max(0, MAX_COMMENT_EDITS - editCount),
+          maxEdits: MAX_COMMENT_EDITS
+        }, { headers: cors });
       } catch (e) {
+        console.error('comments PUT error:', e.message);
         return Response.json({ success: false, error: 'خطا' }, { status: 500, headers: cors });
       }
     }
@@ -1105,17 +1180,24 @@ export default {
         }
 
         const id = url.pathname.split('/').pop();
+        await ensureCommentEditTable(env);
 
-        const result = await env.DB.prepare(
-          'DELETE FROM comments WHERE id = ? AND user_id = ?'
-        ).bind(id, String(user.id)).run();
+        const results = await env.DB.batch([
+          env.DB.prepare(
+            'DELETE FROM comment_edit_counts WHERE comment_id = ? AND user_id = ?'
+          ).bind(id, String(user.id)),
+          env.DB.prepare(
+            'DELETE FROM comments WHERE id = ? AND user_id = ?'
+          ).bind(id, String(user.id))
+        ]);
 
-        if (!result.meta || Number(result.meta.changes || 0) !== 1) {
+        if (!results?.[1]?.meta || Number(results[1].meta.changes || 0) !== 1) {
           return Response.json({ success: false, error: 'دسترسی ندارید' }, { status: 403, headers: cors });
         }
 
         return Response.json({ success: true }, { headers: cors });
       } catch (e) {
+        console.error('comments DELETE error:', e.message);
         return Response.json({ success: false, error: 'خطا' }, { status: 500, headers: cors });
       }
     }
@@ -1130,31 +1212,48 @@ export default {
         const fingerprint = url.searchParams.get('fp') || null;
         const userId = String(user.id);
 
+        await ensureCommentEditTable(env);
+
         const ex = await env.DB.prepare(
-          'SELECT id, comment, name, admin_reply, admin_reply_at FROM comments WHERE user_id = ?'
+          `SELECT c.id, c.comment, c.name, c.admin_reply, c.admin_reply_at,
+                  COALESCE(e.edit_count, 0) AS edit_count
+           FROM comments c
+           LEFT JOIN comment_edit_counts e
+             ON e.comment_id = c.id AND e.user_id = c.user_id
+           WHERE c.user_id = ?
+           LIMIT 1`
         ).bind(userId).first();
 
         const ban = await findActiveBan(env, userId, fingerprint, null);
+        const editCount = Math.min(MAX_COMMENT_EDITS, Math.max(0, Number(ex?.edit_count || 0)));
 
         return Response.json({
           success: true,
           hasComment: !!ex,
-          comment: ex || null,
+          comment: ex ? {
+            id: ex.id,
+            comment: ex.comment,
+            name: ex.name,
+            admin_reply: ex.admin_reply,
+            admin_reply_at: ex.admin_reply_at,
+            edit_count: editCount
+          } : null,
+          editCount: ex ? editCount : 0,
+          remainingEdits: ex ? Math.max(0, MAX_COMMENT_EDITS - editCount) : MAX_COMMENT_EDITS,
+          maxEdits: MAX_COMMENT_EDITS,
           banned: !!ban,
           ban_type: ban ? ban.ban_type : null,
-          banInfo: ban
-            ? {
-                until: ban.is_permanent ? 'همیشه' : toISO(ban.banned_until),
-                reason: ban.reason,
-                ban_type: ban.ban_type
-              }
-            : null
+          banInfo: ban ? {
+            until: ban.is_permanent ? 'همیشه' : toISO(ban.banned_until),
+            reason: ban.reason,
+            ban_type: ban.ban_type
+          } : null
         }, { headers: cors });
       } catch (e) {
+        console.error('comments/check error:', e.message);
         return Response.json({ success: false, error: 'خطا' }, { status: 500, headers: cors });
       }
     }
-
 
 
     return Response.json({ success: true, message: 'API is running' }, { headers: cors });
