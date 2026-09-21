@@ -14,3 +14,9 @@ binding = "AI"
  
  
  
+
+
+# ============ Internal auth service binding ============
+[[services]]
+binding = "AUTH_SERVICE"
+service = "poppy-auth-api"
