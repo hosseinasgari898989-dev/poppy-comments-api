@@ -4,31 +4,50 @@ export default {
     const cors = {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Admin-Token'
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Admin-Token',
+      'Access-Control-Expose-Headers': 'X-Auth-Upstream-Status'
     };
 
     if (request.method === 'OPTIONS') return new Response(null, { headers: cors });
 
     const AUTH_API_URL = 'https://poppy-auth-api.hosseinasgari898989.workers.dev';
 
+    let authUpstreamStatus = 401;
+
     async function getAuthUser() {
       const auth = request.headers.get('Authorization') || '';
-      if (!/^Bearer\s+\S+$/i.test(auth)) return null;
+      if (!/^Bearer\s+\S+$/i.test(auth)) {
+        authUpstreamStatus = 401;
+        return null;
+      }
       try {
         const r = await fetch(AUTH_API_URL + '/api/auth/me', {
           method: 'GET',
+          cache: 'no-store',
           headers: { Authorization: auth }
         });
+        authUpstreamStatus = r.status;
         if (!r.ok) return null;
         const j = await r.json();
         return j && j.success && j.user ? j.user : null;
       } catch (e) {
+        authUpstreamStatus = 503;
         return null;
       }
     }
 
     function unauthorized() {
-      return Response.json({ success: false, error: 'unauthorized', message: 'ابتدا وارد حساب شوید.' }, { status: 401, headers: cors });
+      const upstream = Number(authUpstreamStatus) || 401;
+      const exposed = { ...cors, 'X-Auth-Upstream-Status': String(upstream), 'Cache-Control': 'no-store' };
+      return Response.json(
+        {
+          success: false,
+          error: 'unauthorized',
+          message: upstream === 401 ? 'ابتدا وارد حساب شوید.' : 'سرویس احراز هویت پاسخ غیرعادی داد.',
+          authUpstreamStatus: upstream
+        },
+        { status: 401, headers: exposed }
+      );
     }
 
     async function requireUser() {
