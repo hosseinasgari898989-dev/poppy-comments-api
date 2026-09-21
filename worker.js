@@ -266,7 +266,8 @@ export default {
 
     if (url.pathname === '/api/admin/login' && request.method === 'POST') {
       try {
-        const { token } = await request.json();
+        const body = await request.json().catch(() => ({}));
+        const token = request.headers.get('X-Admin-Token') || body.token || '';
         if (!token || !env.AUTH_ADMIN_TOKEN || token !== env.AUTH_ADMIN_TOKEN) {
           return Response.json({ success: false, error: 'توکن نامعتبر' }, { status: 401, headers: cors });
         }
