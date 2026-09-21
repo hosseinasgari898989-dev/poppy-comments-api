@@ -812,7 +812,7 @@ export default {
     // ============================================
 
     // ---- GET /api/reports/check/:userId?fp=xxx ----
-    if (url.pathname.startsWith('/api/reports/check/') && request.method === 'GET') {
+    if ((url.pathname === '/api/reports/check' || url.pathname.startsWith('/api/reports/check/')) && request.method === 'GET') {
       try {
         const user = await requireUser();
         if (!user) return unauthorized();
@@ -901,7 +901,7 @@ export default {
 
 
 // ---- GET /api/reports/by-user/:userId ----
-    if (url.pathname.startsWith('/api/reports/by-user/') && request.method === 'GET') {
+    if ((url.pathname === '/api/reports/by-user' || url.pathname.startsWith('/api/reports/by-user/')) && request.method === 'GET') {
       try {
         const user = await requireUser();
         if (!user) return unauthorized();
@@ -1101,7 +1101,7 @@ export default {
 
 
 // ---- GET /api/comments/check/:userId?fp=xxx ----
-    if (url.pathname.startsWith('/api/comments/check/') && request.method === 'GET') {
+    if ((url.pathname === '/api/comments/check' || url.pathname.startsWith('/api/comments/check/')) && request.method === 'GET') {
       try {
         const user = await requireUser();
         if (!user) return unauthorized();
