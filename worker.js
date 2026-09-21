@@ -1,13 +1,70 @@
 export default { 
   async fetch(request, env) {
     const url = new URL(request.url);
-    const cors = {  
+    const cors = {
       'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS', 
-      'Access-Control-Allow-Headers': 'Content-Type, X-Admin-Token'
+      'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Admin-Token'
     };
 
     if (request.method === 'OPTIONS') return new Response(null, { headers: cors });
+
+    const AUTH_API_URL = 'https://poppy-auth-api.hosseinasgari898989.workers.dev';
+
+    async function getAuthUser() {
+      const auth = request.headers.get('Authorization') || '';
+      if (!/^Bearer\s+\S+$/i.test(auth)) return null;
+      try {
+        const r = await fetch(AUTH_API_URL + '/api/auth/me', {
+          method: 'GET',
+          headers: { Authorization: auth }
+        });
+        if (!r.ok) return null;
+        const j = await r.json();
+        return j && j.success && j.user ? j.user : null;
+      } catch (e) {
+        return null;
+      }
+    }
+
+    function unauthorized() {
+      return Response.json({ success: false, error: 'unauthorized', message: 'ابتدا وارد حساب شوید.' }, { status: 401, headers: cors });
+    }
+
+    async function requireUser() {
+      const user = await getAuthUser();
+      return user || null;
+    }
+
+    async function takeRateLimit(key, limit, windowMs) {
+      await env.DB.prepare(
+        `CREATE TABLE IF NOT EXISTS abuse_rate_limits (
+          key TEXT PRIMARY KEY,
+          window_start INTEGER NOT NULL,
+          count INTEGER NOT NULL
+        )`
+      ).run();
+
+      const windowStart = Math.floor(Date.now() / windowMs) * windowMs;
+      const row = await env.DB.prepare(
+        'SELECT window_start, count FROM abuse_rate_limits WHERE key = ?'
+      ).bind(key).first();
+
+      if (!row || Number(row.window_start) !== windowStart) {
+        await env.DB.prepare(
+          `INSERT INTO abuse_rate_limits (key, window_start, count) VALUES (?, ?, 1)
+           ON CONFLICT(key) DO UPDATE SET window_start = excluded.window_start, count = 1`
+        ).bind(key, windowStart).run();
+        return true;
+      }
+
+      if (Number(row.count) >= limit) return false;
+
+      await env.DB.prepare(
+        'UPDATE abuse_rate_limits SET count = count + 1 WHERE key = ? AND window_start = ?'
+      ).bind(key, windowStart).run();
+      return true;
+    }
 
     // ============================================
     // STRONG WORDS
@@ -141,9 +198,10 @@ export default {
           temperature: 0.1
         });
         const ans = (r.response || '').toString().toUpperCase().trim();
-        return !ans.includes('BAD');
+        return { ok: !ans.includes('BAD'), available: true };
       } catch (e) {
-        return true;
+        console.error('comment_moderation_ai_error', e);
+        return { ok: false, available: false };
       }
     }
 
@@ -154,8 +212,9 @@ export default {
 
     async function checkComment(comment) {
       if (containsBadWordLocal(comment)) return { valid: false, reason: 'local' };
-      const aiOK = await checkWithAI(comment);
-      if (!aiOK) return { valid: false, reason: 'ai' };
+      const aiResult = await checkWithAI(comment);
+      if (!aiResult.available) return { valid: false, reason: 'ai_unavailable' };
+      if (!aiResult.ok) return { valid: false, reason: 'ai' };
       return { valid: true };
     }
 
@@ -753,11 +812,13 @@ export default {
     // ============================================
 
     // ---- GET /api/reports/check/:userId?fp=xxx ----
-    if (url.pathname.startsWith('/api/reports/check/') && request.method === 'GET') {
+    if ((url.pathname === '/api/reports/check' || url.pathname.startsWith('/api/reports/check/')) && request.method === 'GET') {
       try {
-        const userId = decodeURIComponent(url.pathname.split('/').pop());
-        const fingerprint = url.searchParams.get('fp') || null;
+        const user = await requireUser();
+        if (!user) return unauthorized();
 
+        const fingerprint = url.searchParams.get('fp') || null;
+        const userId = String(user.id);
         const ban = await findActiveBan(env, userId, fingerprint, 'report');
 
         return Response.json({
@@ -774,12 +835,23 @@ export default {
       }
     }
 
-    // ---- POST /api/reports ----
+
+// ---- POST /api/reports ----
     if (url.pathname === '/api/reports' && request.method === 'POST') {
       try {
-        let { userId, userName, type, subject, message, fingerprint } = await request.json();
+        const user = await requireUser();
+        if (!user) return unauthorized();
 
-        if (!userId || !subject || !message) {
+        const allowed = await takeRateLimit('report:' + String(user.id), 5, 60 * 60 * 1000);
+        if (!allowed) {
+          return Response.json({ success: false, error: 'rate_limited', message: 'تعداد گزارش‌ها زیاد است. بعداً دوباره تلاش کنید.' }, { status: 429, headers: cors });
+        }
+
+        let { type, subject, message, fingerprint } = await request.json();
+        const userId = String(user.id);
+        const userName = user.displayId || user.id;
+
+        if (!subject || !message) {
           return Response.json({ success: false, error: 'فیلدها الزامی است' }, { status: 400, headers: cors });
         }
 
@@ -818,7 +890,7 @@ export default {
 
         const result = await env.DB.prepare(
           'INSERT INTO reports (user_id, user_name, type, subject, message) VALUES (?, ?, ?, ?, ?)'
-        ).bind(userId, userName || null, type, subject, message).run();
+        ).bind(userId, userName, type, subject, message).run();
 
         return Response.json({ success: true, id: result.meta.last_row_id }, { status: 201, headers: cors });
       } catch (e) {
@@ -827,11 +899,14 @@ export default {
       }
     }
 
-    // ---- GET /api/reports/by-user/:userId ----
-    if (url.pathname.startsWith('/api/reports/by-user/') && request.method === 'GET') {
-      try {
-        const userId = decodeURIComponent(url.pathname.split('/').pop());
 
+// ---- GET /api/reports/by-user/:userId ----
+    if ((url.pathname === '/api/reports/by-user' || url.pathname.startsWith('/api/reports/by-user/')) && request.method === 'GET') {
+      try {
+        const user = await requireUser();
+        if (!user) return unauthorized();
+
+        const userId = String(user.id);
         const { results } = await env.DB.prepare(
           'SELECT * FROM reports WHERE user_id = ? ORDER BY created_at DESC'
         ).bind(userId).all();
@@ -850,7 +925,8 @@ export default {
       }
     }
 
-    // ============================================
+
+// ============================================
     // USER ROUTES
     // ============================================
 
@@ -873,11 +949,22 @@ export default {
       }
     }
 
-    // ---- POST /api/comments ----
+
+// ---- POST /api/comments ----
     if (url.pathname === '/api/comments' && request.method === 'POST') {
       try {
-        const { name, comment, userId, fingerprint } = await request.json();
-        if (!name || !comment || !userId) {
+        const user = await requireUser();
+        if (!user) return unauthorized();
+
+        const allowed = await takeRateLimit('comment:' + String(user.id), 10, 10 * 60 * 1000);
+        if (!allowed) {
+          return Response.json({ success: false, error: 'rate_limited', message: 'تعداد تلاش‌ها زیاد است. کمی بعد دوباره تلاش کنید.' }, { status: 429, headers: cors });
+        }
+
+        const { name, comment, fingerprint } = await request.json();
+        const userId = String(user.id);
+
+        if (!name || !comment) {
           return Response.json({ success: false, error: 'فیلدها الزامی است' }, { status: 400, headers: cors });
         }
         if (name.length > 50 || comment.length > 500) {
@@ -913,87 +1000,114 @@ export default {
 
         const cc = await checkComment(comment);
         if (!cc.valid) {
+          if (cc.reason === 'ai_unavailable') {
+            return Response.json({ success: false, error: 'moderation_unavailable', message: 'بررسی خودکار محتوا موقتاً در دسترس نیست. دوباره تلاش کنید.' }, { status: 503, headers: cors });
+          }
           return Response.json({ success: false, error: '❌ پیام شما نباید دارای فحش یا توهین باشد.' }, { status: 400, headers: cors });
         }
 
-        let existing = null;
-        if (fingerprint) {
-          existing = await env.DB.prepare(
-            'SELECT id FROM comments WHERE user_id = ? OR (fingerprint IS NOT NULL AND fingerprint = ?) LIMIT 1'
-          ).bind(userId, fingerprint).first();
-        } else {
-          existing = await env.DB.prepare('SELECT id FROM comments WHERE user_id = ?').bind(userId).first();
-        }
+        const existing = await env.DB.prepare(
+          'SELECT id FROM comments WHERE user_id = ? LIMIT 1'
+        ).bind(userId).first();
 
         if (existing) {
           return Response.json({ success: false, error: 'شما قبلاً نظر ثبت کرده‌اید.' }, { status: 403, headers: cors });
         }
 
-        if (fingerprint) {
-          try {
-            await env.DB.prepare(
-              'INSERT INTO comments (name, comment, user_id, fingerprint) VALUES (?, ?, ?, ?)'
-            ).bind(name, comment, userId, fingerprint).run();
-          } catch (e) {
-            await env.DB.prepare('INSERT INTO comments (name, comment, user_id) VALUES (?, ?, ?)').bind(name, comment, userId).run();
-          }
-        } else {
-          await env.DB.prepare('INSERT INTO comments (name, comment, user_id) VALUES (?, ?, ?)').bind(name, comment, userId).run();
+        const insert = await env.DB.prepare(
+          `INSERT INTO comments (name, comment, user_id, fingerprint)
+           SELECT ?, ?, ?, ?
+           WHERE NOT EXISTS (SELECT 1 FROM comments WHERE user_id = ?)`
+        ).bind(name, comment, userId, fingerprint || null, userId).run();
+
+        if (!insert.meta || Number(insert.meta.changes || 0) !== 1) {
+          return Response.json({ success: false, error: 'شما قبلاً نظر ثبت کرده‌اید.' }, { status: 403, headers: cors });
         }
 
         return Response.json({ success: true, message: 'ثبت شد' }, { status: 201, headers: cors });
       } catch (e) {
+        console.error('comments POST error:', e.message);
         return Response.json({ success: false, error: 'خطا در ثبت' }, { status: 500, headers: cors });
       }
     }
 
-    // ---- PUT /api/comments/:id ----
+
+// ---- PUT /api/comments/:id ----
     if (url.pathname.startsWith('/api/comments/') && request.method === 'PUT') {
       try {
+        const user = await requireUser();
+        if (!user) return unauthorized();
+
+        const allowed = await takeRateLimit('comment-edit:' + String(user.id), 20, 10 * 60 * 1000);
+        if (!allowed) {
+          return Response.json({ success: false, error: 'rate_limited', message: 'تعداد ویرایش‌ها زیاد است. کمی بعد دوباره تلاش کنید.' }, { status: 429, headers: cors });
+        }
+
         const id = url.pathname.split('/').pop();
-        const { comment, userId, fingerprint } = await request.json();
-        if (!comment || !userId) {
+        const { comment } = await request.json();
+        if (!comment) {
           return Response.json({ success: false, error: 'فیلدها الزامی' }, { status: 400, headers: cors });
         }
 
         const check = await checkComment(comment);
         if (!check.valid) {
+          if (check.reason === 'ai_unavailable') {
+            return Response.json({ success: false, error: 'moderation_unavailable', message: 'بررسی خودکار محتوا موقتاً در دسترس نیست. دوباره تلاش کنید.' }, { status: 503, headers: cors });
+          }
           return Response.json({ success: false, error: '❌ پیام شما نباید دارای فحش یا توهین باشد.' }, { status: 400, headers: cors });
         }
 
-        const ex = await env.DB.prepare('SELECT user_id FROM comments WHERE id = ?').bind(id).first();
-        if (!ex || ex.user_id !== userId) {
+        const result = await env.DB.prepare(
+          "UPDATE comments SET comment = ?, updated_at = datetime('now') WHERE id = ? AND user_id = ?"
+        ).bind(comment, id, String(user.id)).run();
+
+        if (!result.meta || Number(result.meta.changes || 0) !== 1) {
           return Response.json({ success: false, error: 'دسترسی ندارید' }, { status: 403, headers: cors });
         }
 
-        await env.DB.prepare("UPDATE comments SET comment = ?, updated_at = datetime('now') WHERE id = ?").bind(comment, id).run();
         return Response.json({ success: true }, { headers: cors });
       } catch (e) {
         return Response.json({ success: false, error: 'خطا' }, { status: 500, headers: cors });
       }
     }
 
-    // ---- DELETE /api/comments/:id ----
+
+// ---- DELETE /api/comments/:id ----
     if (url.pathname.startsWith('/api/comments/') && request.method === 'DELETE') {
       try {
+        const user = await requireUser();
+        if (!user) return unauthorized();
+
+        const allowed = await takeRateLimit('comment-delete:' + String(user.id), 20, 10 * 60 * 1000);
+        if (!allowed) {
+          return Response.json({ success: false, error: 'rate_limited', message: 'تعداد درخواست‌ها زیاد است. کمی بعد دوباره تلاش کنید.' }, { status: 429, headers: cors });
+        }
+
         const id = url.pathname.split('/').pop();
-        const { userId } = await request.json();
-        const ex = await env.DB.prepare('SELECT user_id FROM comments WHERE id = ?').bind(id).first();
-        if (!ex || ex.user_id !== userId) {
+
+        const result = await env.DB.prepare(
+          'DELETE FROM comments WHERE id = ? AND user_id = ?'
+        ).bind(id, String(user.id)).run();
+
+        if (!result.meta || Number(result.meta.changes || 0) !== 1) {
           return Response.json({ success: false, error: 'دسترسی ندارید' }, { status: 403, headers: cors });
         }
-        await env.DB.prepare('DELETE FROM comments WHERE id = ?').bind(id).run();
+
         return Response.json({ success: true }, { headers: cors });
       } catch (e) {
         return Response.json({ success: false, error: 'خطا' }, { status: 500, headers: cors });
       }
     }
 
-    // ---- GET /api/comments/check/:userId?fp=xxx ----
-    if (url.pathname.startsWith('/api/comments/check/') && request.method === 'GET') {
+
+// ---- GET /api/comments/check/:userId?fp=xxx ----
+    if ((url.pathname === '/api/comments/check' || url.pathname.startsWith('/api/comments/check/')) && request.method === 'GET') {
       try {
-        const userId = url.pathname.split('/').pop();
+        const user = await requireUser();
+        if (!user) return unauthorized();
+
         const fingerprint = url.searchParams.get('fp') || null;
+        const userId = String(user.id);
 
         const ex = await env.DB.prepare(
           'SELECT id, comment, name, admin_reply, admin_reply_at FROM comments WHERE user_id = ?'
@@ -1019,6 +1133,8 @@ export default {
         return Response.json({ success: false, error: 'خطا' }, { status: 500, headers: cors });
       }
     }
+
+
 
     return Response.json({ success: true, message: 'API is running' }, { headers: cors });
   }
