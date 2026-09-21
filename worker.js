@@ -21,11 +21,12 @@ export default {
         return null;
       }
       try {
-        const r = await fetch(AUTH_API_URL + '/api/auth/me', {
-          method: 'GET',
-          cache: 'no-store',
-          headers: { Authorization: auth }
-        });
+        const r = await env.AUTH_SERVICE.fetch(
+          new Request('https://auth.internal/api/auth/me', {
+            method: 'GET',
+            headers: { Authorization: auth }
+          })
+        );
         authUpstreamStatus = r.status;
         if (!r.ok) return null;
         const j = await r.json();
