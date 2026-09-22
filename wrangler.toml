@@ -1,6 +1,7 @@
 name = "poppy-comments-api"
 main = "worker.js"
 compatibility_date = "2024-01-01"
+compatibility_flags = ["global_fetch_strictly_public"]
 
 # ============ اتصال به دیتابیس D1 ============
 [[d1_databases]]
@@ -16,7 +17,3 @@ binding = "AI"
  
 
 
-# ============ Internal auth service binding ============
-[[services]]
-binding = "AUTH_SERVICE"
-service = "poppy-auth-api"
