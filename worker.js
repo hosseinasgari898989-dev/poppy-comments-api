@@ -354,9 +354,17 @@ async function takeRateLimit(key, limit, windowMs) {
             ban_type: r.ban_type || null
           }));
 
-          const totalRow = await env.DB.prepare('SELECT COUNT(*) AS cnt FROM comments').first();
+          const [totalRow, todayRow] = await Promise.all([
+            env.DB.prepare('SELECT COUNT(*) AS cnt FROM comments').first(),
+            env.DB.prepare("SELECT COUNT(*) AS cnt FROM comments WHERE date(created_at) = date('now')").first()
+          ]);
 
-          return Response.json({ success: true, comments, total: totalRow.cnt || 0 }, { headers: cors });
+          return Response.json({
+            success: true,
+            comments,
+            total: Number(totalRow?.cnt || 0),
+            today: Number(todayRow?.cnt || 0)
+          }, { headers: cors });
         } catch (e) {
           console.error('admin/comments error:', e.message);
           return Response.json({ success: false, error: 'خطا' }, { status: 500, headers: cors });
@@ -734,7 +742,23 @@ async function takeRateLimit(key, limit, windowMs) {
             admin_reply_at: toISO(r.admin_reply_at)
           }));
 
-          return Response.json({ success: true, reports }, { headers: cors });
+          const [totalRow, pendingRow, acceptedRow, rejectedRow] = await Promise.all([
+            env.DB.prepare("SELECT COUNT(*) AS cnt FROM reports").first(),
+            env.DB.prepare("SELECT COUNT(*) AS cnt FROM reports WHERE status = 'pending'").first(),
+            env.DB.prepare("SELECT COUNT(*) AS cnt FROM reports WHERE status = 'accepted'").first(),
+            env.DB.prepare("SELECT COUNT(*) AS cnt FROM reports WHERE status = 'rejected'").first()
+          ]);
+
+          return Response.json({
+            success: true,
+            reports,
+            counts: {
+              total: Number(totalRow?.cnt || 0),
+              pending: Number(pendingRow?.cnt || 0),
+              accepted: Number(acceptedRow?.cnt || 0),
+              rejected: Number(rejectedRow?.cnt || 0)
+            }
+          }, { headers: cors });
         } catch (e) {
           console.error('admin/reports GET error:', e.message);
           return Response.json({ success: false, error: 'خطا' }, { status: 500, headers: cors });
