@@ -31,6 +31,12 @@ export default {
         const j = await r.json();
         return j && j.success && j.user ? j.user : null;
       } catch (e) {
+        console.error('AUTH_UPSTREAM_FETCH_ERROR', {
+          name: e?.name || 'unknown',
+          message: e?.message || String(e),
+          stack: e?.stack || null,
+          url: AUTH_API_URL + '/api/auth/me'
+        });
         authUpstreamStatus = 503;
         return null;
       }
