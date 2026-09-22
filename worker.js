@@ -259,13 +259,34 @@ async function takeRateLimit(key, limit, windowMs) {
       return { valid: true };
     }
 
-    function isAdmin(request) {
-      const token = request.headers.get('X-Admin-Token');
-      return !!(token && env.AUTH_ADMIN_TOKEN && token === env.AUTH_ADMIN_TOKEN);
+    const AUTH_ADMIN_VALIDATE_URL = 'https://poppy-auth-api.hosseinasgari898989.workers.dev/api/admin/validate';
+
+    async function getAdminAccess(request) {
+      const token = request.headers.get('X-Admin-Token') || '';
+      if (!token) return null;
+      try {
+        const r = await fetch(AUTH_ADMIN_VALIDATE_URL, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Admin-Token': token
+          }
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok || !data.success || !data.admin) return null;
+        return data.admin;
+      } catch (e) {
+        console.error('admin_validate_failed', e);
+        return null;
+      }
     }
 
     function adminUnauthorized() {
       return Response.json({ success: false, error: 'دسترسی ندارید' }, { status: 401, headers: cors });
+    }
+
+    function adminForbidden() {
+      return Response.json({ success: false, error: 'سطح دسترسی کافی نیست' }, { status: 403, headers: cors });
     }
 
     function toISO(sqliteDate) {
@@ -306,20 +327,17 @@ async function takeRateLimit(key, limit, windowMs) {
     // ============================================
 
     if (url.pathname === '/api/admin/login' && request.method === 'POST') {
-      try {
-        const body = await request.json().catch(() => ({}));
-        const token = request.headers.get('X-Admin-Token') || body.token || '';
-        if (!token || !env.AUTH_ADMIN_TOKEN || token !== env.AUTH_ADMIN_TOKEN) {
-          return Response.json({ success: false, error: 'توکن نامعتبر' }, { status: 401, headers: cors });
-        }
-        return Response.json({ success: true }, { headers: cors });
-      } catch (e) {
-        return Response.json({ success: false, error: 'خطا' }, { status: 500, headers: cors });
+      const admin = await getAdminAccess(request);
+      if (!admin) {
+        return Response.json({ success: false, error: 'توکن نامعتبر' }, { status: 401, headers: cors });
       }
+      return Response.json({ success: true, admin }, { headers: cors });
     }
 
     if (url.pathname.startsWith('/api/admin/')) {
-      if (!isAdmin(request)) return adminUnauthorized();
+      const admin = await getAdminAccess(request);
+      if (!admin) return adminUnauthorized();
+      if (request.method !== 'GET' && Number(admin.roleLevel || 1) < 2) return adminForbidden();
 
       // ---- GET /api/admin/comments ----
       if (url.pathname === '/api/admin/comments' && request.method === 'GET') {
@@ -628,6 +646,7 @@ async function takeRateLimit(key, limit, windowMs) {
 
       // ---- POST /api/admin/settings ----
       if (url.pathname === '/api/admin/settings' && request.method === 'POST') {
+        if (Number(admin.roleLevel || 1) < 3) return adminForbidden();
         try {
           const { settings } = await request.json();
           if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
@@ -653,6 +672,7 @@ async function takeRateLimit(key, limit, windowMs) {
 
       // ---- POST /api/admin/update-mode ----
       if (url.pathname === '/api/admin/update-mode' && request.method === 'POST') {
+        if (Number(admin.roleLevel || 1) < 3) return adminForbidden();
         try {
           const { enabled, message } = await request.json();
           if (typeof enabled !== 'boolean') {
@@ -686,6 +706,7 @@ async function takeRateLimit(key, limit, windowMs) {
 
       // ---- POST /api/admin/server-status ----
       if (url.pathname === '/api/admin/server-status' && request.method === 'POST') {
+        if (Number(admin.roleLevel || 1) < 3) return adminForbidden();
         try {
           const { status, message } = await request.json();
           if (status !== 'online' && status !== 'offline') {
