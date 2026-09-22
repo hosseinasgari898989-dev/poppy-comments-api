@@ -84,24 +84,27 @@ async function takeRateLimit(key, limit, windowMs) {
       ).run();
 
       const windowStart = Math.floor(Date.now() / windowMs) * windowMs;
-      const row = await env.DB.prepare(
-        'SELECT window_start, count FROM abuse_rate_limits WHERE key = ?'
-      ).bind(key).first();
 
-      if (!row || Number(row.window_start) !== windowStart) {
-        await env.DB.prepare(
-          `INSERT INTO abuse_rate_limits (key, window_start, count) VALUES (?, ?, 1)
-           ON CONFLICT(key) DO UPDATE SET window_start = excluded.window_start, count = 1`
-        ).bind(key, windowStart).run();
-        return true;
-      }
+      // Atomic reservation: check + increment happens in one SQL write.
+      const result = await env.DB.prepare(
+        `INSERT INTO abuse_rate_limits (key, window_start, count)
+         VALUES (?, ?, 1)
+         ON CONFLICT(key) DO UPDATE SET
+           window_start = CASE
+             WHEN abuse_rate_limits.window_start <> excluded.window_start
+               THEN excluded.window_start
+             ELSE abuse_rate_limits.window_start
+           END,
+           count = CASE
+             WHEN abuse_rate_limits.window_start <> excluded.window_start
+               THEN 1
+             ELSE abuse_rate_limits.count + 1
+           END
+         WHERE abuse_rate_limits.window_start <> excluded.window_start
+            OR abuse_rate_limits.count < ?`
+      ).bind(key, windowStart, limit).run();
 
-      if (Number(row.count) >= limit) return false;
-
-      await env.DB.prepare(
-        'UPDATE abuse_rate_limits SET count = count + 1 WHERE key = ? AND window_start = ?'
-      ).bind(key, windowStart).run();
-      return true;
+      return Number(result?.meta?.changes || 0) === 1;
     }
 
     // ============================================
