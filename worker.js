@@ -5,6 +5,10 @@ export default {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Admin-Token',
+      'Cache-Control': 'no-store',
+      'Pragma': 'no-cache',
+      'X-Content-Type-Options': 'nosniff',
+      'Referrer-Policy': 'no-referrer',
       'Access-Control-Expose-Headers': 'X-Auth-Upstream-Status'
     };
 
