@@ -23,7 +23,7 @@ export default {
       try {
         const r = await fetch(AUTH_API_URL + '/api/auth/me', {
           method: 'GET',
-          cache: 'no-store',
+
           headers: { Authorization: auth }
         });
         authUpstreamStatus = r.status;
