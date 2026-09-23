@@ -232,18 +232,40 @@ async function takeRateLimit(key, limit, windowMs) {
           messages: [
             {
               role: 'system',
-              content: 'You are a strict multilingual profanity detector. Detect insults, vulgar language, sexual content, hate speech, or harassment in Persian (Farsi), English, or romanized Persian. Reply with ONLY one word: "OK" if the text is clean, or "BAD" if it contains any inappropriate content. No explanations, no punctuation.'
+              content: [
+                'You are the primary safety moderator for a public comments section.',
+                'Classify ONLY the submitted comment itself as either OK or BAD.',
+                '',
+                'Return BAD when the comment contains any of the following:',
+                '- profanity, vulgar or obscene language, including Persian/Farsi, regional or colloquial Persian, English, and romanized Persian (Finglish);',
+                '- slurs or hate speech targeting a protected group;',
+                '- direct personal insults, degrading name-calling, or abusive harassment;',
+                '- sexually explicit or pornographic language/content;',
+                '- threats or severe abusive language.',
+                '',
+                'Return OK for ordinary conversation, questions, compliments, disagreement, criticism, jokes, game discussion, spoilers, slang, or negative opinions when they do NOT contain profanity, a slur, explicit sexual content, a direct abusive insult, or a threat.',
+                '',
+                'Be context-aware and multilingual. Recognize spelling variations, spacing, repeated letters, punctuation, transliteration, common obfuscation, and local/colloquial forms.',
+                'Do NOT mark a normal sentence BAD just because one innocent word resembles a swear word in another context.',
+                'Do NOT mark ordinary criticism such as “I dislike this”, “this update is bad”, or “I disagree” as BAD unless it also contains actual abusive language.',
+                'Ignore the fact that the text is quoted, discussing moderation, or mentioning the name of a game/character; classify the actual language used.',
+                '',
+                'Reply with ONLY one word: OK or BAD. No explanation, no punctuation.'
+              ].join(' ')
             },
             {
               role: 'user',
-              content: `Check this comment: "${text}"`
+              content: text
             }
           ],
-          max_tokens: 5,
-          temperature: 0.1
+          max_tokens: 2,
+          temperature: 0
         });
         const ans = (r.response || '').toString().toUpperCase().trim();
-        return { ok: !ans.includes('BAD'), available: true };
+        if (ans === 'BAD') return { ok: false, available: true };
+        if (ans === 'OK') return { ok: true, available: true };
+        console.error('comment_moderation_ai_invalid_output', { response: ans });
+        return { ok: false, available: false };
       } catch (e) {
         console.error('comment_moderation_ai_error', e);
         return { ok: false, available: false };
@@ -256,7 +278,9 @@ async function takeRateLimit(key, limit, windowMs) {
     }
 
     async function checkComment(comment) {
-      if (containsBadWordLocal(comment)) return { valid: false, reason: 'local' };
+      // Comments are moderated by the AI model only.
+      // The local word list is intentionally NOT used here so normal messages are
+      // not rejected just because they contain a word that can have multiple meanings.
       const aiResult = await checkWithAI(comment);
       if (!aiResult.available) return { valid: false, reason: 'ai_unavailable' };
       if (!aiResult.ok) return { valid: false, reason: 'ai' };
